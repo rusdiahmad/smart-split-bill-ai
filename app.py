@@ -1,143 +1,150 @@
+# app.py
+
 import streamlit as st
+import json
 import os
-from services.image_reader import extract_receipt
-from services.split_service import compute_splits
+from ai_service import extract_bill_data_gemini 
 
-st.set_page_config(page_title="Smart Split Bill AI", layout="wide")
+# --- Fungsi Utama Aplikasi Streamlit ---
+def smart_split_bill_app():
+    st.set_page_config(page_title="SmartSplit Bill AI", layout="wide")
+    st.title("💰 SmartSplit Bill AI Prototype")
+    st.caption("Mini Project SmartSplit Bill - Dibimbing")
 
-# ========================
-# INIT SESSION STATE
-# ========================
-if "page" not in st.session_state:
-    st.session_state.page = 1
+    # Inisialisasi Session State
+    if 'data_loaded' not in st.session_state:
+        st.session_state['data_loaded'] = False
+        st.session_state['extracted_data'] = None
 
-if "parsed" not in st.session_state:
-    st.session_state.parsed = None
+    # --- 1. Upload & Ekstraksi AI ---
+    st.header("1. Upload Nota & Ekstraksi Data")
+    
+    uploaded_file = st.file_uploader("Upload Gambar Nota (JPEG/PNG)", type=["jpg", "jpeg", "png"])
 
-if "report" not in st.session_state:
-    st.session_state.report = None
+    if uploaded_file is not None:
+        # Simpan file sementara untuk diolah oleh AI
+        temp_file_path = f"temp_{uploaded_file.name}"
+        with open(temp_file_path, "wb") as f:
+            f.write(uploaded_file.getbuffer())
 
-def go_to(step):
-    st.session_state.page = step
-    st.rerun()
+        st.image(uploaded_file, caption='Nota yang Diunggah', width=400)
+        
+        if st.button('Proses Nota dengan AI (Gemini)'):
+            with st.spinner('AI sedang membaca dan mengekstrak data...'):
+                raw_result, latency, extracted_data = extract_bill_data_gemini(temp_file_path)
+                
+                if isinstance(extracted_data, dict):
+                    st.session_state['extracted_data'] = extracted_data
+                    st.session_state['data_loaded'] = True
+                    st.success(f"Ekstraksi data berhasil! (Latensi: {latency:.2f}s)")
+                    st.json(extracted_data) # Tampilkan data mentah hasil ekstraksi
+                else:
+                    st.session_state['data_loaded'] = False
+                    st.error(f"Gagal memproses hasil AI: {extracted_data}")
+                    st.code(raw_result)
+                    
+    # --- 2. Split Bill Logics ---
+    if st.session_state['data_loaded']:
+        extracted_data = st.session_state['extracted_data']
+        
+      
+        # Memastikan 'items' ada dan berupa list
+        if not extracted_data or 'items' not in extracted_data or not isinstance(extracted_data['items'], list):
+            st.error("⚠️ EKSTRAKSI GAGAL: Data yang diterima dari AI tidak lengkap atau tidak memiliki kunci 'items' (daftar item belanja) yang valid. Mohon periksa kembali output JSON di atas.")
+            st.session_state['data_loaded'] = False # Reset status
+            return # Hentikan proses split bill jika data utama tidak ada
+        # =======================================================================
+        
+        st.markdown("---")
+        st.header("2. Alokasi Biaya dan Split Bill")
 
+        # 2a. Tampilkan Data Utama
+        total_bill = extracted_data.get('total_harga_bill', 0.0)
+        st.metric("TOTAL HARGA BILL DARI NOTA", f"Rp{total_bill:,.2f}")
 
-# ========================
-# PAGE 1 — UPLOAD
-# ========================
-def page_upload():
-    st.title("📸 Upload Receipt")
-
-    uploaded = st.file_uploader("Upload foto nota", type=["jpg", "jpeg", "png"])
-
-    if uploaded:
-        img_path = os.path.join("assets", uploaded.name)
-        with open(img_path, "wb") as f:
-            f.write(uploaded.getbuffer())
-
-        st.image(img_path, caption="Preview Nota", use_column_width=True)
-
-        backend = st.radio("Pilih metode OCR:", ["manual", "ai"])
-
-        parsed = extract_receipt(img_path, backend=backend)
-
-        st.session_state.parsed = extract_receipt("assets/nota1.jpg", backend="manual")
-
-        st.subheader("Hasil Parsing")
-        st.json(parsed)
-
-        if st.button("Next →"):
-            go_to(2)
-
-    st.subheader("Contoh Nota")
-    col1, col2 = st.columns(2)
-
-    if col1.button("Gunakan nota1.jpg"):
-        st.session_state.parsed = extract_receipt("assets/nota1.jpg", backend="manual")
-        go_to(2)
-
-    if col2.button("Gunakan nota2.jpg"):
-        st.session_state.parsed = extract_receipt("assets/nota2.jpg", backend="manual")
-        go_to(2)
-
-
-# ========================
-# PAGE 2 — SPLIT
-# ========================
-def page_split():
-    st.title("🧮 Split Bill")
-
-    parsed = st.session_state.parsed
-    if parsed is None:
-        st.error("Silakan upload nota dulu.")
-        return
-
-    items = parsed.get("items", [])
-    extras = parsed.get("extras", [])
-    subtotal = parsed.get("subtotal", 0)
-    total = parsed.get("total", 0)
-
-    st.subheader("Daftar Item")
-    st.table([{"Item": it["name"], "Harga": it["total_price"]} for it in items])
-
-    st.info(f"Subtotal: Rp {subtotal:,}")
-    st.info(f"Total: Rp {total:,}")
-
-    names = st.text_input("Nama peserta (pisahkan dengan koma)", "A,B")
-    participants = [n.strip() for n in names.split(",") if n.strip()]
-
-    st.subheader("Assign item ke peserta")
-    assignments = {}
-
-    for idx, it in enumerate(items):
-        assignments[idx] = st.multiselect(
-            f"{it['name']} – Rp {it['total_price']:,}",
-            participants,
-            default=participants[:1]
+        # 2b. Input Partisipan
+        st.subheader("👥 Partisipan")
+        participants_input = st.text_input(
+            "Masukkan nama partisipan (dipisahkan koma)",
+            value="Andi, Budi, Clara",
+            key="participants_input"
         )
+        participants = [name.strip() for name in participants_input.split(',') if name.strip()]
+        
+        if not participants:
+            st.warning("Silakan masukkan minimal satu nama partisipan.")
+            return
 
-    if st.button("Hitung →"):
-        st.session_state.report = compute_splits(parsed, assignments, participants)
-        go_to(3)
-
-    if st.button("← Back"):
-        go_to(1)
-
-
-# ========================
-# PAGE 3 — REPORT
-# ========================
-def page_report():
-    st.title("📊 Report Pembayaran")
-
-    report = st.session_state.report
-    if report is None:
-        st.error("Belum ada laporan.")
-        return
-
-    st.subheader("Total Per Orang")
-    st.table([
-        {"Nama": p, "Total (Rp)": report["totals"][p]}
-        for p in report["totals"]
-    ])
-
-    st.subheader("Detail Per Orang")
-    for p in report["totals"]:
-        st.write(f"### {p}")
-        st.table(report["breakdown"][p])
-
-    if st.button("← Back"):
-        go_to(2)
+        # 2c. Tugaskan Item dan Biaya Tambahan
+        st.subheader("🏷️ Tentukan Pembayar untuk Setiap Item")
+        
+       
+        if 'assignments' not in st.session_state or len(st.session_state['assignments']) != len(extracted_data['items']):
+            st.session_state['assignments'] = [participants[0]] * len(extracted_data['items']) 
+            
+        # Tampilan penugasan item
+        for i, item in enumerate(extracted_data['items']):
+            col1, col2, col3, col4 = st.columns([1, 4, 2, 4])
+            
+            col1.write(f"**{item['jumlah']}x**")
+            col2.write(f"{item['nama_item']}")
+            col3.write(f"Rp{item['total_harga_item']:,.2f}")
+            
+            default_index = participants.index(st.session_state['assignments'][i]) if st.session_state['assignments'][i] in participants else 0
+                
+            selected_participant = col4.selectbox(
+                'Dibayar oleh:',
+                participants,
+                index=default_index,
+                key=f"item_assign_{i}",
+                on_change=lambda i=i: st.session_state.update({f'assignments': [
+                    st.session_state[f"item_assign_{j}"] if j == i else st.session_state['assignments'][j] for j in range(len(extracted_data['items']))
+                ]})
+            )
+            st.session_state['assignments'][i] = selected_participant
 
 
-# ========================
-# PAGE ROUTING
-# ========================
-if st.session_state.page == 1:
-    page_upload()
-elif st.session_state.page == 2:
-    page_split()
-elif st.session_state.page == 3:
-    page_report()
-else:
-    st.write("Error: Page tidak ditemukan.")
+        # Alokasi Biaya Tambahan (dibagi rata untuk POC)
+        st.subheader("⚙️ Biaya Tambahan (Dibagi Rata)")
+        
+        total_surcharge = (
+            extracted_data.get('biaya_pengiriman', 0.0) +
+            extracted_data.get('biaya_layanan', 0.0) +
+            extracted_data.get('biaya_pengemasan', 0.0) +
+            extracted_data.get('diskon_voucher', 0.0)
+        )
+        
+        num_participants_paying_surcharge = len(participants)
+        surcharge_per_person = total_surcharge / num_participants_paying_surcharge if num_participants_paying_surcharge > 0 else 0
+        st.info(f"Total Biaya Tambahan/Diskon: Rp{total_surcharge:,.2f}. Dibagi rata menjadi **Rp{surcharge_per_person:,.2f} per orang**.")
+
+        # 2d. Laporan Akhir
+        st.markdown("---")
+        st.header("3. Laporan Total Pembayaran Akhir")
+        
+        final_totals = {p: 0.0 for p in participants}
+
+        # Hitung total item
+        for i, item in enumerate(extracted_data['items']):
+            payer = st.session_state['assignments'][i]
+            final_totals[payer] += item['total_harga_item']
+        
+        # Hitung total akhir (Item + Surcharge)
+        final_payment_totals = {
+            p: final_totals[p] + surcharge_per_person for p in participants
+        }
+
+        # Tampilan Final
+        final_table_data = {
+            'Partisipan': participants,
+            'Biaya Item': [f"Rp{final_totals[p]:,.2f}" for p in participants],
+            'Biaya Tambahan/Diskon (Rata)': [f"Rp{surcharge_per_person:,.2f}" for p in participants],
+            'TOTAL BAYAR': [f"**Rp{final_payment_totals[p]:,.2f}**" for p in participants]
+        }
+        
+        st.table(final_table_data)
+
+
+
+if __name__ == '__main__':
+    smart_split_bill_app()
